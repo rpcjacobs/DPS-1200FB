@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -75,29 +75,37 @@ DrTune/March 2017
 """
 import sys, os
 import time
-import smbus
-
+from smbus2 import SMBus, SMBusWrapper, i2c_msg
 
 class PowerSupply(object):
     def __init__(self,address):  #address 0..7 reflecting the i2c address select bits on the PSU edge connector
-        self.i2c = smbus.SMBus()    # 0 = /dev/i2c-0 (port I2C0), 1 = /dev/i2c-1 (port I2C1)
-        self.address=0x5F
-        self.EEaddress=0x57+address
+        self.address=0x58
+        self.EEaddress=0x50
 
-        self.numReg=0x5F/2
-        self.lastReg=[0 for n in range(self.numReg)]
-        self.minReg=[0xffff for n in range(self.numReg)]
-        self.maxReg=[0 for n in range(self.numReg)]
+        self.numReg=0x58/2
+        self.lastReg=[0 for n in range(int(self.numReg))]
+        self.minReg=[0xffff for n in range(int(self.numReg))]
+        self.maxReg=[0 for n in range(int(self.numReg))]
         
 
     #not very interesting - read the 24c02 eeprom (you can write it too)
     def readEEPROM(self):
-        data=self.i2c.read(self.EEaddress,0,255)
-        print data
-        print "%s" % (" ".join([ "%02x" % ord(d) for d in data]) )
+        # Does not seem to work on a raspberry pi, so can't test
+        # Use eeprog and guide from https://www.richud.com/wiki/Rasberry_Pi_I2C_EEPROM_Program#Atmel_24C02_I2C_EPROM
+        with SMBusWrapper(1) as bus:
+            msg = i2c_msg.read(self.EEaddress, 256)
+            bus.i2c_rdwr(msg)
+            #print(msg.buf)
+            #data = list(msg)
+            #print(msg.len)
+            #for value in msg:
+            #    print(value)
+            for k in range(msg.len):
+                       print(msg.buf[k])
+            #print("%s" % (" ".join([ "%02x" % ord(d) for d in msg.buf]) ))
 
     #the most useful
-    def readDPS1200(self,reg,count):
+    def readDPS1200(self,reg):
         cs=reg+(self.address<<1)
         regCS=((0xff-cs)+1)&0xff  #this is the 'secret sauce' - if you don't add the checksum byte when reading a register the PSU will play dumb
         #checksum is [ i2c_address, reg_address, checksum ] where checksum is as above.
@@ -105,8 +113,15 @@ class PowerSupply(object):
         #this should write [address,register,checksum] and then read two bytes (send address+read bit, read lsb,read msb)
         #note this device doesn't require you to use a "repeated start" I2C condition - you can just do start/write/stop;start/read/stop
         try:
-            #return self.i2c.readVar(self.address,writeInts,count)
-            return self.i2c.read_i2c_block_data(self.address,writeInts,count)
+            with SMBusWrapper(1) as bus:
+                 # Write reg and checksum
+                 msg = i2c_msg.write(self.address, writeInts)
+                 bus.i2c_rdwr(msg)
+                 # Read 2 bytes from address
+                 msg = i2c_msg.read(self.address, 2)
+                 bus.i2c_rdwr(msg)
+            return msg.buf
+
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
@@ -158,8 +173,10 @@ class PowerSupply(object):
         writeInts=[reg,valLSB,valMSB,regCS]  #write these 4 bytes to i2c
         bytes="".join([chr(n) for n in writeInts])
         try:
-           return self.i2c.write_byte(self.address, bytes)
-           #return self.i2c.writeVar(self.address, bytes)  #<<Fix to work with smbus
+            with SMBusWrapper(1) as bus:
+                msg = i2c_msg.write(self.address, bytes)
+                bus.i2c_rdwr(msg)
+            return msg.buf
         except Exception as e:
            exc_type, exc_obj, exc_tb = sys.exc_info()
            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
@@ -173,7 +190,7 @@ class PowerSupply(object):
         #for n in [0x40]:
             for b in range(16):
                 value=(1<<b)-1
-                print "%02x : %04x" % (n,value)
+                print("%02x : %04x" % (n,value))
                 self.writeDPS1200(n,value)
                 time.sleep(0.5)
 
@@ -185,7 +202,7 @@ class PowerSupply(object):
         0x04:["INPUT_VOLTAGE",32.0], #e.g. 120 (volts)
         0x05:["AMPS_IN",128.0],
         0x06:["WATTS_IN",2.0],
-        0x07:["OUTPUT_VOLTAGE",254.5], #pretty sure this is right; unclear why scale is /254.5 not /256 but it's wrong - can't see how they'd not be measuring this to high precision
+        0x07:["OUTPUT_VOLTAGE",253], #pretty sure this is right; unclear why scale is /254.5 not /256 but it's wrong - can't see how they'd not be measuring this to high precision
         0x08:["AMPS_OUT",128.0],  #rather inaccurate at low output <10A (reads under) - appears to have internal load for stability so always reads about 1.5 even open circuit
         0x09:["WATTS_OUT",2.0],
         0x0d:["TEMP1_INTAKE_FARENHEIT",32.0],   # this is a guess - may be C or F but F looks more right
@@ -207,21 +224,21 @@ class PowerSupply(object):
         }
 
     def readDPS1200Register(self,reg):
-        data=self.readDPS1200(reg<<1,3)  #if low bit set returns zeros (so use even # cmds)
+        data=self.readDPS1200(reg<<1)  #if low bit set returns zeros (so use even # cmds)
         #check checksum (why not)
-        replyCS=0
-        for d in data:
-            replyCS+=ord(d)
-        replyCS=((0xff-replyCS)+1)&0xff  #check reply checksum (not really reqd)
-        if replyCS!=0:
-            raise Exception("Read error")
-        data=data[:-1]
+        #replyCS=0
+        #for d in data:
+        #    replyCS+=ord(d)
+        #replyCS=((0xff-replyCS)+1)&0xff  #check reply checksum (not really reqd)
+        #if replyCS!=0:
+        #    raise Exception("Read error")
+        #data=data[:-1]
         value=ord(data[0]) | ord(data[1])<<8
         return value
 
 
     def read(self):
-        for n in range(self.numReg):
+        for n in range(int(self.numReg)):
             try:
                 value=self.readDPS1200Register(n)
                 self.minReg[n]=min(self.minReg[n],value)
@@ -234,16 +251,16 @@ class PowerSupply(object):
                         value+=self.readDPS1200Register(n+1)<<16
                 else:
                     scale=1
-                print "%02x\t%04x\t" % (n<<1,value ),
+                print("%02x\t%04x\t" % (n<<1,value ), end="")
                 if scale:
-                    print "%d\t%d\t%d\t(%d)\t%.3f\t%s" % (value,self.minReg[n],self.maxReg[n],self.maxReg[n]-self.minReg[n],value/scale,name )
+                    print("%d\t%d\t%d\t(%d)\t%.3f\t%s" % (value,self.minReg[n],self.maxReg[n],self.maxReg[n]-self.minReg[n],value/scale,name ))
                 else:
-                    print "%s\t%s" % (bin(value),name)
-            except Exception,ex:
+                    print("%s\t%s" % (bin(value),name))
+            except Exception as e:
                 exc_type, exc_obj, exc_tb = sys.exc_info()
                 fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                 print(exc_type, fname, exc_tb.tb_lineno)
-                print "r %02x er %s" % (n,ex)
+                print("r %02x er %s" % (n,e))
         return
         addr=self.address
 
@@ -251,8 +268,9 @@ class PowerSupply(object):
 
 ps=PowerSupply(1)
 
+
 while True:
-    print "\033c" #clear screen
+    print("\033c") #clear screen
     ps.read()
     time.sleep(0.1)
     #ps.testWrite()
